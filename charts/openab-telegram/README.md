@@ -101,10 +101,12 @@ curl -s "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
 ## Quick Start
 
 ```bash
-helm install my-bot ./charts/openab-telegram \
+# Find your Telegram user ID by messaging @userinfobot on Telegram.
+helm install my-bot oci://ghcr.io/openabdev/charts/openab-telegram \
   --set telegramBotToken="<token-from-botfather>" \
   --set cloudflareTunnelToken="$(cloudflared tunnel token my-telegram-bot)" \
   --set webhookDomain=bot.example.com \
+  --set platform.allowedUsers="{<your-telegram-user-id>}" \
   --namespace openab --create-namespace
 ```
 
@@ -115,7 +117,7 @@ Three options, from simplest to most secure:
 ### Option 1: `--set` (simple, least secure)
 
 ```bash
-helm install my-bot ./charts/openab-telegram \
+helm install my-bot oci://ghcr.io/openabdev/charts/openab-telegram \
   --set telegramBotToken="123:ABC" \
   --set cloudflareTunnelToken="eyJ..." \
   --namespace openab --create-namespace
@@ -132,7 +134,7 @@ kubectl create secret generic my-bot-creds -n openab \
   --from-literal=telegram-bot-token="123:ABC" \
   --from-literal=cloudflare-tunnel-token="eyJ..."
 
-helm install my-bot ./charts/openab-telegram \
+helm install my-bot oci://ghcr.io/openabdev/charts/openab-telegram \
   --set existingSecret=my-bot-creds \
   --namespace openab
 ```
@@ -149,7 +151,7 @@ kubectl create secret generic my-bot-creds -n openab \
     --secret-id oab --query SecretString --output text | \
     jq -r '{"telegram-bot-token": .telegramBotToken, "cloudflare-tunnel-token": .cloudflareTunnelToken} | to_entries[] | "\(.key)=\(.value)"')
 
-helm install my-bot ./charts/openab-telegram \
+helm install my-bot oci://ghcr.io/openabdev/charts/openab-telegram \
   --set existingSecret=my-bot-creds \
   --namespace openab
 ```
@@ -231,8 +233,8 @@ To have an AI agent handle the full install, prompt it with:
 | `image.tag` | No | `appVersion` | Agent image tag |
 | `gateway.tag` | No | `v0.5.0` | Gateway image tag |
 | `agent.command` | No | `kiro-cli` | Agent command |
-| `platform.allowAllUsers` | No | `true` | Allow any Telegram user |
-| `platform.allowedUsers` | No | `[]` | Allowed Telegram user IDs |
+| `platform.allowAllUsers` | No | `false` | Allow any Telegram user (opt-in) |
+| `platform.allowedUsers` | No | `[]` | Allowed Telegram user IDs (get yours from [@userinfobot](https://t.me/userinfobot)) |
 | `persistence.enabled` | No | `true` | Enable PVC for agent state |
 | `persistence.size` | No | `1Gi` | PVC size |
 
