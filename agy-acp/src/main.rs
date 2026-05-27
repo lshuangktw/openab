@@ -332,6 +332,7 @@ impl Adapter {
                     .as_ref()
                     .and_then(|before| self.new_conversation_id(before));
 
+                let mut persist_conv_id: Option<String> = None;
                 if let Some(session) = self.sessions.get_mut(session_id) {
                     let newly_bound = session.conversation_id.is_none() && conv_id.is_some();
                     if session.conversation_id.is_none() {
@@ -339,9 +340,8 @@ impl Adapter {
                     }
                     if session.conversation_id.is_some() {
                         session.prev_output = full_text;
-                        // Persist binding only on first successful bind
                         if newly_bound {
-                            self.persist_session(session_id, session.conversation_id.as_deref());
+                            persist_conv_id = session.conversation_id.clone();
                         }
                     } else {
                         session.prev_output.clear();
@@ -350,6 +350,9 @@ impl Adapter {
                              running in single-turn mode"
                         );
                     }
+                }
+                if let Some(ref cid) = persist_conv_id {
+                    self.persist_session(session_id, Some(cid.as_str()));
                 }
 
                 let notification = serde_json::to_string(&JsonRpcNotification {
