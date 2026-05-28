@@ -16,6 +16,11 @@ on:
         required: false
         type: boolean
         default: false
+      no_cache:
+        description: 'Build without Docker layer cache'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -109,8 +114,8 @@ jobs:
           file: ${{ matrix.variant.dockerfile }}
           platforms: ${{ matrix.platform.os }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.variant.suffix }},push-by-digest=true,name-canonical=true,push=${{ inputs.dry_run != true }}
-          cache-from: type=gha,scope=${{ matrix.variant.suffix }}-${{ matrix.platform.os }}
-          cache-to: type=gha,scope=${{ matrix.variant.suffix }}-${{ matrix.platform.os }},mode=max
+          cache-from: ${{ inputs.no_cache != true && format('type=gha,scope={0}-{1}', matrix.variant.suffix, matrix.platform.os) || '' }}
+          cache-to: ${{ inputs.no_cache != true && format('type=gha,scope={0}-{1},mode=max', matrix.variant.suffix, matrix.platform.os) || '' }}
 
       - name: Export digest
         if: inputs.dry_run != true
