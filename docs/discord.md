@@ -274,7 +274,29 @@ helm install openab openab/openab \
 ### Known limitations
 
 - **One thread per message:** when you @mention both bots in a single message, only the first bot creates a thread. The second bot's thread creation fails and the message is dropped. Workaround: @mention each bot in separate messages.
-- **Thread ownership:** a bot only responds in threads it owns or has participated in (`involved` mode). To have Bot B respond in Bot A's thread, use `mentions` mode and explicitly @mention Bot B.
+- **Thread ownership (involvement gate):** a bot only responds in threads it owns or has participated in. See the Involvement Gate section below for full details.
+
+### Involvement Gate
+
+In a multi-bot setup, every bot enforces an **involvement gate** before processing any message in a thread. This gate is evaluated before `allow_user_messages` or `allow_bot_messages` mode checks.
+
+**Rule:** A bot must be **involved** (thread owner or has previously replied) before it will process any message in that thread.
+
+**Key constraint:** Only a human @mention can pull a bot into a thread for the first time. A bot @mentioning another bot that is not yet involved will be **silently dropped**.
+
+```
+Bot A's thread (Bot B not yet involved):
+
+  Bot A: "@Bot_B please review this"     → ❌ dropped (Bot B not involved)
+  Human: "@Bot_B please review this"     → ✅ Bot B replies, now involved
+  Bot A: "@Bot_B any updates?"           → ✅ processed (Bot B is involved)
+```
+
+**Why:** This prevents bots from pulling other bots into arbitrary threads without human consent, protects session pool resources, and eliminates cross-thread chain reactions.
+
+**Workaround:** Pre-involve all needed bots at thread creation by @mentioning them (or using a shared role via `allowed_role_ids`).
+
+> 📖 Full design details: [docs/messaging.md — Involvement Gate](messaging.md#involvement-gate)
 
 ### Recommended: `multibot-mentions` mode
 

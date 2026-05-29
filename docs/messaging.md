@@ -258,3 +258,70 @@ Layer 4 — Bot → Bot (Thread)
     "mentions"                  →  Only if explicitly @mentioned by a bot
     "all"                       →  All involved bots respond (capped)
 ```
+
+---
+
+## Involvement Gate
+
+All message routing in OpenAB is guarded by the **involvement gate** — a pre-dispatch check that determines whether a bot should process a message in a given thread. This gate runs **before** `allow_user_messages` and `allow_bot_messages` mode checks.
+
+### Design principle
+
+**Humans are the gatekeepers.** A bot cannot participate in a thread until a human explicitly pulls it in via @mention. Bots cannot pull other bots into threads — only humans can.
+
+### How a bot becomes involved
+
+A bot is considered **involved** in a thread if either condition is true:
+
+1. **Thread owner** — the bot created the thread (human @mentioned it in a channel)
+2. **Has participated** — the bot has previously replied in the thread
+
+A bot that has never posted in a thread is **not involved** and will not receive messages from that thread, regardless of `allow_bot_messages` or `allow_user_messages` settings.
+
+### Gate evaluation order
+
+```
+Inbound message in thread
+  │
+  ├─ Is it the bot's own message? → ignore
+  │
+  ├─ Is the bot involved in this thread?
+  │     │
+  │     ├─ YES → proceed to mode checks:
+  │     │         • allow_user_messages (for human messages)
+  │     │         • allow_bot_messages (for bot messages)
+  │     │         • bot_turns cap
+  │     │         → dispatch to session
+  │     │
+  │     └─ NO → is there an explicit @mention of this bot?
+  │               │
+  │               ├─ From a human → pass (bot will reply and become involved)
+  │               │
+  │               └─ From another bot → ❌ DROP (bot-to-bot cannot break the gate)
+  │
+  └─ Message dropped — never reaches Dispatcher or SessionPool
+```
+
+### Why bot-to-bot cannot break the involvement gate
+
+This is an intentional safety constraint:
+
+1. **Resource control** — each involved thread creates an agent session (subprocess). Allowing bots to pull other bots in would let a single bot consume session slots across many threads without human oversight.
+2. **Human authority** — the human decides which bots participate in which conversations. This prevents unexpected bot pile-ups.
+3. **Loop prevention** — without this gate, Bot A could @mention Bot B into a thread, Bot B could @mention Bot C, creating unbounded chain reactions across threads.
+
+### Practical impact
+
+| Scenario | Result |
+|----------|--------|
+| Human @mentions Bot B in Bot A's thread | ✅ Bot B replies, becomes involved |
+| Bot A @mentions Bot B (Bot B not yet involved) | ❌ Silently dropped |
+| Bot A @mentions Bot B (Bot B already involved) | ✅ Processed per `allow_bot_messages` mode |
+| Human @mentions Bot B, then Bot A @mentions Bot B | ✅ Works — Bot B is already involved |
+
+### Workaround for bot-to-bot handoff
+
+If you need Bot A to hand off to Bot B in a thread where Bot B is not yet involved:
+
+1. **Pre-involve all bots** — have the human @mention all relevant bots at thread creation (e.g. via a shared role in `allowed_role_ids`)
+2. **Use a shared channel** — configure both bots in the same channel with `allow_bot_messages = "mentions"`, and have the human @mention both bots to start the thread
