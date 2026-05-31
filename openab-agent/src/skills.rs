@@ -10,7 +10,7 @@ pub struct Skill {
 }
 
 /// Scan skill directories and return discovered skills.
-/// Scans: working_dir/.openab/skills/ then ~/.openab/skills/
+/// Scans: working_dir/.openab/skills/ then ~/.openab/agent/skills/
 /// First occurrence of a name wins (project-local takes precedence).
 pub fn discover_skills(working_dir: &Path) -> Vec<Skill> {
     let mut skills = Vec::new();
