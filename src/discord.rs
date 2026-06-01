@@ -457,7 +457,20 @@ impl EventHandler for Handler {
 
         // Bot message gating (from upstream #321)
         if msg.author.bot {
-            // Trusted bot @mention bypass: treat as human mention, skip mode check.
+            // Trusted bot admission override: when a bot listed in `trusted_bot_ids`
+            // explicitly @mentions this bot, bypass the entire `allow_bot_messages`
+            // mode check. This treats the trusted bot's @mention identically to a
+            // human @mention — the bot becomes involved in the thread and the message
+            // is dispatched regardless of the `allow_bot_messages` setting.
+            //
+            // Rationale: `trusted_bot_ids` expresses admin-level trust. A trusted bot
+            // that @mentions this bot is performing a deliberate handoff/coordination
+            // action, equivalent to a human pulling the bot into a conversation.
+            //
+            // Safety: requires both (1) explicit @mention AND (2) sender in
+            // trusted_bot_ids. Messages from trusted bots without @mention still
+            // follow normal gating. Empty trusted_bot_ids (default) disables this
+            // entirely — no behavioral change for existing deployments.
             let trusted_mention = is_mentioned
                 && !self.trusted_bot_ids.is_empty()
                 && self.trusted_bot_ids.contains(&msg.author.id.get());
@@ -2992,6 +3005,89 @@ mod tests {
     fn empty_trusted_ids_no_bypass() {
         let trusted: HashSet<u64> = HashSet::new();
         assert!(!is_trusted_bot_mention(true, &trusted, 42));
+    }
+
+    // --- Trusted bot admission integration tests ---
+    // These test the full bot gating decision path: allow_bot_messages mode +
+    // trusted_bot_ids + trusted mention bypass, mirroring the actual logic in
+    // EventHandler::message.
+
+    /// Simulates the bot admission decision from EventHandler::message.
+    /// Returns `true` if the bot message would be processed (not dropped).
+    fn should_admit_bot_message(
+        allow_bot_messages: AllowBots,
+        is_mentioned: bool,
+        trusted_bot_ids: &HashSet<u64>,
+        author_id: u64,
+    ) -> bool {
+        let trusted_mention = is_mentioned
+            && !trusted_bot_ids.is_empty()
+            && trusted_bot_ids.contains(&author_id);
+
+        if !trusted_mention {
+            match allow_bot_messages {
+                AllowBots::Off => return false,
+                AllowBots::Mentions => {
+                    if !is_mentioned {
+                        return false;
+                    }
+                }
+                AllowBots::All => {} // would check consecutive cap, skip for unit test
+            }
+
+            if !trusted_bot_ids.is_empty() && !trusted_bot_ids.contains(&author_id) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// GIVEN: allow_bot_messages=Off, trusted bot @mentions this bot
+    /// THEN:  admitted (trusted mention overrides Off mode)
+    #[test]
+    fn bot_admission_trusted_mention_overrides_off() {
+        let trusted = HashSet::from([42]);
+        assert!(should_admit_bot_message(AllowBots::Off, true, &trusted, 42));
+    }
+
+    /// GIVEN: allow_bot_messages=Off, untrusted bot @mentions this bot
+    /// THEN:  rejected (Off mode blocks)
+    #[test]
+    fn bot_admission_untrusted_mention_blocked_by_off() {
+        let trusted = HashSet::from([42]);
+        assert!(!should_admit_bot_message(AllowBots::Off, true, &trusted, 99));
+    }
+
+    /// GIVEN: allow_bot_messages=Off, trusted bot without @mention
+    /// THEN:  rejected (no mention = no bypass)
+    #[test]
+    fn bot_admission_trusted_no_mention_blocked_by_off() {
+        let trusted = HashSet::from([42]);
+        assert!(!should_admit_bot_message(AllowBots::Off, false, &trusted, 42));
+    }
+
+    /// GIVEN: allow_bot_messages=Off, empty trusted_bot_ids, bot @mentions
+    /// THEN:  rejected (feature not configured)
+    #[test]
+    fn bot_admission_empty_trusted_ids_off_mode() {
+        let trusted: HashSet<u64> = HashSet::new();
+        assert!(!should_admit_bot_message(AllowBots::Off, true, &trusted, 42));
+    }
+
+    /// GIVEN: allow_bot_messages=Mentions, trusted bot @mentions
+    /// THEN:  admitted (would pass anyway, but bypass also works)
+    #[test]
+    fn bot_admission_mentions_mode_trusted_mention() {
+        let trusted = HashSet::from([42]);
+        assert!(should_admit_bot_message(AllowBots::Mentions, true, &trusted, 42));
+    }
+
+    /// GIVEN: allow_bot_messages=All, untrusted bot (not in trusted_bot_ids)
+    /// THEN:  rejected by trusted_bot_ids filter
+    #[test]
+    fn bot_admission_all_mode_untrusted_bot_rejected() {
+        let trusted = HashSet::from([42]);
+        assert!(!should_admit_bot_message(AllowBots::All, false, &trusted, 99));
     }
 
     // --- DM gating tests (#656) ---
