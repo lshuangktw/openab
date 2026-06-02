@@ -456,17 +456,16 @@ impl Adapter {
                     match self.read_response_from_db(cid, last_step_idx) {
                         Some((text, idx)) => {
                             eprintln!("[agy-acp] delta from SQLite (steps {} → {})", last_step_idx, idx);
-                            (text, idx)
+                            (Some(text), idx)
                         }
                         None => {
-                            // DB read returned no text — likely schema change or empty response
                             eprintln!("[agy-acp] WARN: SQLite read returned no new text (step_payload field 8 missing?)");
-                            (String::new(), last_step_idx)
+                            (None, last_step_idx)
                         }
                     }
                 } else {
                     eprintln!("[agy-acp] WARN: could not bind conversation ID; single-turn mode");
-                    (full_text.clone(), -1i64)
+                    (Some(full_text.clone()), -1i64)
                 };
 
                 // Persist session state
@@ -479,26 +478,39 @@ impl Adapter {
                     self.persist_session(session_id, bound_conv_id.as_deref(), new_step_idx);
                 }
 
-                let notification = serde_json::to_string(&JsonRpcNotification {
-                    jsonrpc: "2.0",
-                    method: "session/update".to_string(),
-                    params: json!({
-                        "sessionId": session_id,
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": { "type": "text", "text": new_text },
-                        },
-                    }),
-                })
-                .unwrap();
-                output_lines.push(notification);
-                let resp = JsonRpcResponse {
-                    jsonrpc: "2.0",
-                    id,
-                    result: Some(json!({ "stopReason": "end_turn" })),
-                    error: None,
-                };
-                output_lines.push(serde_json::to_string(&resp).unwrap());
+                match new_text {
+                    Some(text) => {
+                        let notification = serde_json::to_string(&JsonRpcNotification {
+                            jsonrpc: "2.0",
+                            method: "session/update".to_string(),
+                            params: json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": { "type": "text", "text": text },
+                                },
+                            }),
+                        })
+                        .unwrap();
+                        output_lines.push(notification);
+                        let resp = JsonRpcResponse {
+                            jsonrpc: "2.0",
+                            id,
+                            result: Some(json!({ "stopReason": "end_turn" })),
+                            error: None,
+                        };
+                        output_lines.push(serde_json::to_string(&resp).unwrap());
+                    }
+                    None => {
+                        let resp = JsonRpcResponse {
+                            jsonrpc: "2.0",
+                            id,
+                            result: None,
+                            error: Some(json!({"code":-32001,"message":"agy responded but response extraction failed — possible schema change in conversation DB"})),
+                        };
+                        output_lines.push(serde_json::to_string(&resp).unwrap());
+                    }
+                }
             }
             Err(e) => {
                 let resp = JsonRpcResponse {
