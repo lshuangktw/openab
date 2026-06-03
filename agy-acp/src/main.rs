@@ -227,6 +227,18 @@ impl Adapter {
             &db_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ).ok()?;
+
+        // Verify steps table exists
+        let table_exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='steps'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(false);
+        if !table_exists {
+            eprintln!("[agy-acp] WARN: steps table not found in {}.db — schema changed?", conversation_id);
+            return None;
+        }
+
         let mut stmt = conn.prepare(
             "SELECT idx, step_payload FROM steps WHERE idx > ?1 AND step_type = 15 ORDER BY idx"
         ).ok()?;
@@ -246,10 +258,11 @@ impl Adapter {
         }
         if response_parts.is_empty() {
             if !rows.is_empty() {
+                let payload_sizes: Vec<usize> = rows.iter().map(|(_, p)| p.len()).collect();
                 eprintln!(
-                    "[agy-acp] WARN: {} new steps found but none had extractable text \
+                    "[agy-acp] WARN: {} new steps found (payload sizes: {:?}) but none had extractable text \
                      (field 20.1 missing — schema change?)",
-                    rows.len()
+                    rows.len(), payload_sizes
                 );
             }
             return None;
@@ -1122,5 +1135,123 @@ mod tests {
 
         drop(stdin);
         let _ = child.wait();
+    }
+
+    #[test]
+    #[ignore] // filesystem I/O
+    fn test_read_response_multi_step_no_skip_no_duplicate() {
+        let root = std::env::temp_dir().join(format!("agy-acp-multi-step-{}", Uuid::new_v4()));
+        let conv_dir = root.join("conversations");
+        fs::create_dir_all(&conv_dir).unwrap();
+
+        let db_path = conv_dir.join("multi.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE steps (
+                idx INTEGER PRIMARY KEY,
+                step_type INTEGER NOT NULL DEFAULT 0,
+                status INTEGER NOT NULL DEFAULT 0,
+                has_subtrajectory NUMERIC NOT NULL DEFAULT 0,
+                metadata BLOB,
+                error_details BLOB,
+                permissions BLOB,
+                task_details BLOB,
+                render_info BLOB,
+                step_payload BLOB,
+                step_format INTEGER NOT NULL DEFAULT 0
+            )"
+        ).unwrap();
+
+        // Helper: build payload with field 20 (sub-msg) → field 1 (text)
+        fn make_payload(text: &str) -> Vec<u8> {
+            // Inner message: field 1, wire type 2 (LEN), <text>
+            let text_bytes = text.as_bytes();
+            let mut inner = vec![0x0A]; // tag: field 1, wire type 2
+            let mut len = text_bytes.len();
+            loop {
+                if len < 128 { inner.push(len as u8); break; }
+                inner.push((len as u8 & 0x7F) | 0x80);
+                len >>= 7;
+            }
+            inner.extend_from_slice(text_bytes);
+
+            // Outer: field 20, wire type 2 (LEN), <inner>
+            // tag = (20 << 3) | 2 = 162 → varint [0xA2, 0x01]
+            let mut outer = vec![0xA2, 0x01];
+            let mut ilen = inner.len();
+            loop {
+                if ilen < 128 { outer.push(ilen as u8); break; }
+                outer.push((ilen as u8 & 0x7F) | 0x80);
+                ilen >>= 7;
+            }
+            outer.extend(inner);
+            outer
+        }
+
+        // step_type 0 = user, step_type 15 = response
+        // Step 1: user prompt (step_type=0, no extractable text)
+        conn.execute("INSERT INTO steps (idx, step_type, step_payload) VALUES (1, 0, X'0801')", []).unwrap();
+        // Step 2: bot response "hello"
+        conn.execute("INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
+            rusqlite::params![2i64, make_payload("hello")]).unwrap();
+        // Step 3: user prompt
+        conn.execute("INSERT INTO steps (idx, step_type, step_payload) VALUES (3, 0, X'0802')", []).unwrap();
+        // Step 4: bot response "world"
+        conn.execute("INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
+            rusqlite::params![4i64, make_payload("world")]).unwrap();
+        // Step 5: bot response multi-line
+        conn.execute("INSERT INTO steps (idx, step_type, step_payload) VALUES (?1, 15, ?2)",
+            rusqlite::params![5i64, make_payload("line1\nline2\nline3")]).unwrap();
+        drop(conn);
+
+        let adapter = Adapter {
+            sessions: HashMap::new(),
+            working_dir: root.to_string_lossy().to_string(),
+            conversations_dir: conv_dir,
+            state_file: root.join("sessions.json"),
+        };
+
+        // From start: get all response steps
+        let result = adapter.read_response_from_db("multi", -1);
+        assert_eq!(result, Some(("hello\nworld\nline1\nline2\nline3".to_string(), 5)));
+
+        // After step 2: skip "hello", get "world" + multi-line
+        let result = adapter.read_response_from_db("multi", 2);
+        assert_eq!(result, Some(("world\nline1\nline2\nline3".to_string(), 5)));
+
+        // After step 4: only multi-line
+        let result = adapter.read_response_from_db("multi", 4);
+        assert_eq!(result, Some(("line1\nline2\nline3".to_string(), 5)));
+
+        // After step 5: nothing new
+        let result = adapter.read_response_from_db("multi", 5);
+        assert_eq!(result, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore] // filesystem I/O
+    fn test_read_response_missing_steps_table() {
+        let root = std::env::temp_dir().join(format!("agy-acp-noschema-{}", Uuid::new_v4()));
+        let conv_dir = root.join("conversations");
+        fs::create_dir_all(&conv_dir).unwrap();
+
+        let db_path = conv_dir.join("empty.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE other (id INTEGER)").unwrap();
+        drop(conn);
+
+        let adapter = Adapter {
+            sessions: HashMap::new(),
+            working_dir: root.to_string_lossy().to_string(),
+            conversations_dir: conv_dir,
+            state_file: root.join("sessions.json"),
+        };
+
+        let result = adapter.read_response_from_db("empty", -1);
+        assert_eq!(result, None);
+
+        let _ = fs::remove_dir_all(root);
     }
 }
